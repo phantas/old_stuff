@@ -1,0 +1,222 @@
+#!/bin/sh
+#
+# description: daily secure backup with remote sync of critical files and 
+#              directories in Linux/UNIX; in Mac OS X some changes may be required
+#
+# note: missing the part for recovering backups
+#
+# author: Paula Valenca, May 2007
+#
+# edit the default variables below to match your context and
+# the exclude file for files to be excluded
+#
+# change $VERBOSE to false and copy this script to cron.daily for
+# automated daily updates (recommend a verbose run first to test)
+# or, better yet, write a small script that calls this one, for example:
+
+# #!/bin/sh
+# # calls script to backup files/dirs in tarballs
+# #
+# 
+# test -x /usr/local/bin/dailybackup || exit 0
+# 
+# dailybackup -nv -d "/usr/local/Backups/daily" -s user@mydomain.org:my/daily/backup/
+#
+
+#
+# USER EDIT BELLOW
+#
+# CHANGE THE FOLLOWING DEFAULT VARIABLES APPROPRIATELY
+#
+# NOTE THAT MOST OF THESE VARIABLES CAN BE CHANGED WHILE RUNNING THE SCRIPT
+#
+
+HOME_DEFAULT=/home/* #to be used in the unlikely case $HOME is not defined
+					 # in Mac OS it's /Users/
+HOME="${HOME:-$HOME_DEFAULT}"
+
+PGP_USER=$USER             # the PGP_USER whose keys you want to use
+
+if [ -n $HOME ]; then
+	GNUPGHOME="$HOME/.gnupg/"  # GnuPG home with keys
+    SSH_ID="$HOME/.ssh/id_rsa" # SSH keys for remote sync
+fi
+
+EXCLUDE_DEFAULT=/usr/local/include/backup/exclude # directories to exclude (default file)
+
+BACKUP_DIR_DEFAULT=/usr/local/Backups # location to place backups (default)
+
+BACKUP_DEFAULT="$HOME/*"              # default files and directories to backup
+
+#
+# END OF USER EDIT
+#
+
+BACKUP_dir="$BACKUP_DIR_DEFAULT/daily"
+
+BLOCKSIZE=4m
+SHAS="$BACKUP_dir/shas"
+
+BACKUP_files="$BACKUP_DEFAULT"
+EXCLUDE_files="$EXCLUDE_DEFAULT"
+
+VERBOSE=true
+
+while [ $# -gt 0 ]
+do
+  case $1 in	
+      -h)
+	  echo "Usage: dailybackup [OPTIONS] [FILES ...]"
+	  echo "Backups FILES ... (default $BACKUP_DEFAULT)"
+	  echo
+	  echo "Options:"
+	  echo "  -h, this help"
+	  echo "  -v, verbose (default)"
+	  echo "  -nv, non verbose, silent"
+	  echo "  -d DIR, directory where backups will be placed"
+	  echo "          (default $BACKUP_DIR_DEFAULT/daily)"
+	  echo "  -x FILE, file containing the listing of files to be excluded"
+	  echo "          (default $EXCLUDE_DEFAULT)"
+	  echo
+	  echo "  -s USER@URL:[DIR], rsync backed up files to URL,"
+	  echo "                     where directory to sync is given"
+	  echo "                     by -d or reverts to default"
+	  exit 0
+	  ;;
+      -v)
+	  VERBOSE=true
+	  shift;
+	  ;;
+      -nv)
+	  VERBOSE=false
+	  shift;
+	  ;;
+      -d)
+	  if [ -n "$2" ]; then
+	      BACKUP_dir="$2"
+	      shift;shift;
+	  else
+	      $VERBOSE && echo "error: missing argument"
+	      exit 1
+	  fi
+	  ;;
+      -x)
+	  if [ -n "$2" ]; then
+	      EXCLUDE_files="$2"
+	      shift;shift;
+	  else
+	      $VERBOSE && echo "error: missing argument"
+	      exit 1
+	  fi
+	  ;;
+      -s | -sync)
+	  if [ -n "$2" ]; then
+	      URL_dir="$2"
+	      shift;shift;
+	  else
+	      $VERBOSE && echo "error: missing argument"
+	      exit 1
+	  fi
+	  if [ -d $BACKUP_dir ]; then
+	      rsync -acv -e "ssh -i $SSH_ID" --delete "$BACKUP_dir" "$URL_dir"
+	      exit 0
+	  else
+	      $VERBOSE && echo "error: $BACKUP_dir is not valid"
+	      exit 1
+	  fi
+	  ;;
+      -*)
+	  echo "Unknown option: $1"
+	  echo "See $0 -h for a list of options"
+	  exit 1
+	  ;;
+      *)
+	  BACKUP_files="$@"
+	  break
+	  ;;
+  esac
+done
+
+
+
+
+$VERBOSE && echo "Backups will be placed in $BACKUP_dir"
+if [ -d $BACKUP_dir ]; then
+    $VERBOSE && \
+	echo "Directory already exists, previous backups will be updated"
+else
+    $VERBOSE && echo "Creating directory..."
+    mkdir -p $BACKUP_dir
+fi
+mkdir -p "$BACKUP_dir/GPG/"
+
+if [ ! -e $EXCLUDE_files ]; then
+    $VERBOSE && \
+	echo "Warning: $EXCLUDE_files does not exist," \
+	"assuming empty list of files to exclude"
+    touch ${EXCLUDE_files}
+fi
+
+if [ -e $SHAS ]; then
+    $VERBOSE && echo "Moving previous sha sums to $SHAS.old..."
+else
+    touch $SHAS
+fi
+mv "$SHAS" "$SHAS.old"
+echo "shasum for $BACKUP_dir" > "$SHAS"
+
+descend()
+{
+    dir=$1
+    bkdir=$2
+    bkbase=""
+
+    for file in $dir
+    do
+      if [ ! -e "$file" ]; then
+	  $VERBOSE && echo "$file does not exist"
+	  exit 1
+      else
+	  cd `dirname "$file"`
+	  base=`basename "$file"`
+	  $VERBOSE && echo -n "Backing up ${file}..."
+	  tar c -X${EXCLUDE_files} "$base" | split -a 4 -b ${BLOCKSIZE} - "$bkdir/$base."
+	  $VERBOSE && echo "done"
+	  for block in "$bkdir/${base}"*
+	  do
+	    sum=`shasum "${block}"`
+	    unchanged=`grep "$sum" --no-filename $SHAS.old`
+	    if [ -z "$unchanged" ]; then
+		gpg -e -r $PGP_USER "${block}"
+		bkbase=`shasum "${block}.gpg"`
+		bkbase=${bkbase%%[[:space:]]*}
+		mv "${block}.gpg" "$bkdir/GPG/$bkbase"
+		echo "($bkbase) $sum" >> "$SHAS"
+	    else
+		echo "$unchanged" >> "$SHAS"
+	    fi
+	    rm -f "${block}"
+	  done
+      fi
+    done
+}
+
+# no log?
+$VERBOSE && echo "Will now backup $BACKUP_files..."
+$VERBOSE && echo "ATTENTION: a log will not be created"
+
+descend "$BACKUP_files" "$BACKUP_dir"
+
+$VERBOSE && echo "Cleaning old backups..."
+
+for file in "$BACKUP_dir/GPG/"*; do
+    base=`basename "$file"`
+    found=`grep "$base" $SHAS`
+    if [ -z "$found" ]; then
+	rm -f $file
+    fi
+done
+
+$VERBOSE && echo "Done"
+
+exit 0

@@ -1,0 +1,269 @@
+#!/bin/sh
+#
+# description: script to backup files/dirs in tarballs in Linux/UNIX
+#              in Mac OS X some changes may be required
+#
+# author: Paula Valenca, May 2007
+#
+# edit the default variables below to match your context and
+# the exclude file for files to be excluded
+#
+# change $VERBOSE to false and copy this script to cron.monthly for
+# automated monthly updates (recommend a verbose run first to test)
+# or, better yet, write a small script that calls this one, for example:
+
+# #!/bin/sh
+# # calls script to backup files/dirs in tarballs
+# #
+# 
+# test -x /usr/local/bin/backup || exit 0
+# 
+# dir=`date +%m%y`
+# 
+# backup -nv -d "/usr/local/Backups/$dir"
+#
+
+#
+# USER EDIT BELLOW
+#
+# CHANGE THE FOLLOWING DEFAULT VARIABLES APPROPRIATELY
+#
+# NOTE THAT MOST OF THESE VARIABLES CAN BE CHANGED WHILE RUNNING THE SCRIPT
+#
+
+HOME_DEFAULT=/home/* #to be used in the unlikely case $HOME is not defined
+                     # in Mac OS it's /Users/
+HOME="${HOME:-$HOME_DEFAULT}"
+
+if [ -n $HOME ]; then
+    SSH_ID="$HOME/.ssh/id_rsa"
+fi
+
+EXCLUDE_DEFAULT=/usr/local/include/backup/exclude # directories to exclude (default file)
+
+BACKUP_DIR_DEFAULT=/usr/local/Backups # location to place backups (default)
+
+BACKUP_DEFAULT="/usr/local $HOME/*"   # default files and directories to backup
+
+DVD_BURN_APP=growisofs
+DVD_BURN_OPTIONS="-dvd-compat -Z /dev/dvd -R -J"
+
+#
+# END OF USER EDIT
+#
+
+
+BACKUP_name=`date +%d%m%y`
+BACKUP_dir="$BACKUP_DIR_DEFAULT/$BACKUP_name"
+BACKUP_files="$BACKUP_DEFAULT"
+EXCLUDE_files="$EXCLUDE_DEFAULT"
+
+VERBOSE=true
+
+MAX_DVD_SPACE=4700000
+
+while [ $# -gt 0 ]
+do
+  case $1 in	
+      -h)
+	  echo "Usage: backup [OPTIONS] [FILES ...]"
+	  echo "Backups FILES ... (default $BACKUP_DEFAULT)"
+	  echo
+	  echo "Options:"
+	  echo "  -h, this help"
+	  echo "  -v, verbose (default)"
+	  echo "  -nv, non verbose, silent"
+	  echo "  -f NAME, id tag to be used for backups (default date)"
+	  echo "  -d DIR, directory where backups will be placed"
+	  echo "          (default $BACKUP_DIR_DEFAULT/date)"
+	  echo "  -x FILE, file containing the listing of files to be excluded"
+	  echo "          (default $EXCLUDE_DEFAULT)"
+	  echo
+	  echo "  -copy TO [FROM ...],"
+	  echo "  -c TO [FROM ...], do not backup, instead copy files FROM ..."
+	  echo "          (default $BACKUP_DIR_DEFAULT/*) to directory TO"
+	  echo "          updates if already existent and in verbose mode"
+	  echo "          provides the option to remove the local copy (FROM)"
+	  echo
+	  echo "  -burn,"
+	  echo "  -b, do not backup, instead burn FILES into a DVD"
+	  echo "          (default $BACKUP_DIR_DEFAULT/*)"
+	  echo "  -sync USER@URL:[DIR],"
+	  echo "  -s USER@URL:[DIR], rsync backed up files to URL,"
+	  echo "                     where directory to sync is given"
+	  echo "                     by -d or reverts to default"
+	  exit 0
+	  ;;
+      -v)
+	  VERBOSE=true
+	  shift;
+	  ;;
+      -nv)
+	  VERBOSE=false
+	  shift;
+	  ;;
+      -f)
+	  if [ -n "$2" ]; then
+	      BACKUP_name="$2"
+	      shift;shift;
+	  else
+	      $VERBOSE && echo "error: missing argument"
+	      exit 1
+	  fi
+	  ;;
+      -d)
+	  if [ -n "$2" ]; then
+	      BACKUP_dir="$2"
+	      shift;shift;
+	  else
+	      $VERBOSE && echo "error: missing argument"
+	      exit 1
+	  fi
+	  ;;
+      -x)
+	  if [ -n "$2" ]; then
+	      EXCLUDE_files="$2"
+	      shift;shift;
+	  else
+	      $VERBOSE && echo "error: missing argument"
+	      exit 1
+	  fi
+	  ;;
+      -c | -copy)
+	  if [ -n "$2" ] && [ -d "$2" ]; then
+	      TO="$2"
+	      shift;shift;
+	      FROM="${@:-$BACKUP_DIR_DEFAULT/*}"
+	      for file in $FROM
+	      do
+		if [ ! -e $file ]; then
+		    $VERBOSE && echo "$file does not exist"
+		    exit 1
+		fi
+		base=`basename $file`
+		$VERBOSE && echo -n "copying $base to $TO... "
+		if [ "$file" != "$base" ]; then
+		    cd `dirname $file`
+		fi
+		cp -ru "$base" "$TO"
+		if $VERBOSE; then
+		    echo -n "done, remove $base (yes/no)? [no] "
+		    read remove
+		    if [ "$remove" = "yes" ]; then
+			rm -rf $base
+		    fi
+		fi
+	      done
+	      exit 0
+	  else
+	      $VERBOSE && echo "error: missing or wrong argument"
+	      exit 1
+	  fi
+	  ;;
+
+      -b | -burn)
+	  shift;
+          FROM="${@:-$BACKUP_DIR_DEFAULT/*}"
+
+	  size=0
+	  for file in $FROM
+	  do
+	    if [ ! -e $file ]; then
+		$VERBOSE && echo "$file does not exist"
+		exit 1
+	    fi
+	    du=$(du -s $file)
+	    size=$(($size + ${du%%[[:space:]]*}))
+	  done
+	  if [ $size -gt $MAX_DVD_SPACE ]; then
+	      $VERBOSE && echo "files exceed DVD capacity: $size"
+	      exit 1
+	  fi
+	  if $VERBOSE; then
+	      echo -n "Introduce blank DVD and press enter when ready"
+	      read
+	      $DVD_BURN_APP $DVD_BURN_OPTIONS $FROM
+	  else
+	      $DVD_BURN_APP $DVD_BURN_OPTIONS $FROM >> /dev/null
+	  fi
+          exit 0
+	  ;;
+
+      -s | -sync)
+	  if [ -n "$2" ]; then
+	      URL_dir="$2"
+	      shift;shift;
+	  else
+	      $VERBOSE && echo "error: missing argument"
+	      exit 1
+	  fi
+	  if [ -d $BACKUP_dir ]; then
+	      rsync -acv -e ssh -i "$SSH_ID" --delete "$BACKUP_dir" "$URL_dir" 
+	  else
+	      $VERBOSE && echo "error: $BACKUP_dir is not valid"
+	      exit 1
+	  fi
+	  ;;
+      -*)
+	  echo "Unknown option: $1"
+	  echo "See backup -h for a list of options"
+	  exit 1
+	  ;;
+      *)
+	  BACKUP_files="$@"
+	  break
+	  ;;
+  esac
+done
+
+$VERBOSE && echo "Backups will be placed in $BACKUP_dir"
+if [ -d $BACKUP_dir ]; then
+    $VERBOSE && \
+	echo "Directory already exists, previous backups might be overwritten"
+else
+    $VERBOSE && echo "Creating directory..."
+    mkdir -p $BACKUP_dir
+fi
+
+if [ ! -e $EXCLUDE_files ]; then
+    $VERBOSE && \
+	echo "Warning: $EXCLUDE_files does not exist," \
+	"assuming empty list of files to exclude"
+    touch ${EXCLUDE_files}
+fi
+
+$VERBOSE && echo "Will now backup $BACKUP_files"
+touch "${BACKUP_dir}/log"
+
+for file in $BACKUP_files
+do
+
+  if [ ! -e $file ]; then
+      $VERBOSE && echo "$file does not exist"
+      exit 1
+  else
+      cd `dirname ${file}`
+      $VERBOSE && echo -n "Backing up ${file}..."
+      base=`basename ${file}`
+      tarball="${BACKUP_dir}/${base}${BACKUP_name}.tgz"
+      tar zcvf ${tarball} -X${EXCLUDE_files} ${base} \
+	  >> "${BACKUP_dir}/log" 2>&1
+      $VERBOSE && echo "done"
+  fi
+
+done
+
+# Changing permissions for the backups to $USERNAME
+# it's useful in my case
+# *BUT*
+# This may be a security loophole so I advise leaving it commented...
+if [ -n "$USERNAME" ]; then
+    chown -R ${USERNAME}:${USERNAME} $BACKUP_dir
+fi
+# end of critical area
+
+
+$VERBOSE && \
+    echo "Please check $BACKUP_dir/log to verify that" \
+    "the process was successful"
+exit 0
